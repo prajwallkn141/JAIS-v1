@@ -1,0 +1,193 @@
+{
+  "name": "JAIS v1 - Read-only historical review",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "e5d6851a-c3e8-4b2c-b7cb-023f6b966e25",
+      "name": "Run manually",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "after:1759273199"
+            },
+            {
+              "name": "maxResults",
+              "value": "500"
+            },
+            {
+              "name": "includeSpamTrash",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "parameters": {
+                "parameters": [
+                  {
+                    "name": "pageToken",
+                    "value": "={{ $response.body.nextPageToken }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.nextPageToken }}"
+            }
+          }
+        }
+      },
+      "id": "22946415-0d8c-4ede-b932-06e0f95e1f16",
+      "name": "List up to 10 IDs — read only",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "messages",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        0
+      ],
+      "id": "582ab250-2a0d-4785-a3b3-c8bac90d8fe4",
+      "name": "Split Out"
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + $json.id + '?format=full' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleOAuth2Api",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 4000
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        672,
+        0
+      ],
+      "id": "44296ea1-0b4d-44bf-a674-85ac842a5aa2",
+      "name": "HTTP Request",
+      "retryOnFail": true,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Local review preparation only: no network calls and no Gmail changes.\nconst START = 1759273200000;\nfunction collect(part, out) {\n  if (!part || part.filename) return;\n  if (part.mimeType === 'message/rfc822') return;\n  if (['text/plain','text/html'].includes(part.mimeType)) {\n    const contentType = (part.headers || []).find(h => h.name.toLowerCase() === 'content-type')?.value || '';\n    const charset = /charset=[\"']?([^;\"'\\s]+)/i.exec(contentType)?.[1]?.toLowerCase() || 'utf-8';\n    if (!['utf-8','utf8','us-ascii','ascii'].includes(charset)) out.warnings.push('Unsupported charset: ' + charset);\n    if (part.body?.data) {\n      const text = Buffer.from(part.body.data.replace(/-/g,'+').replace(/_/g,'/'),'base64').toString('utf8');\n      out[part.mimeType === 'text/plain' ? 'plain' : 'html'].push(text);\n    } else if (part.body?.attachmentId) out.warnings.push('Body requires separate attachment retrieval');\n  }\n  for (const child of part.parts || []) collect(child, out);\n}\nfunction htmlText(html) {\n  return html.replace(/<script\\b[^>]*>[\\s\\S]*?<\\/script>/gi,' ').replace(/<style\\b[^>]*>[\\s\\S]*?<\\/style>/gi,' ').replace(/<br\\s*\\/?\\s*>|<\\/(p|div|li|tr)>/gi,'\\n').replace(/<[^>]*>/g,' ').replace(/&nbsp;/gi,' ').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>').replace(/&quot;/gi,'\"').replace(/&#39;/g,\"'\").replace(/&#(\\d+);/g,(_,n)=>Number(n)<=0x10ffff?String.fromCodePoint(Number(n)):' ').replace(/[ \\t]+/g,' ').replace(/\\n\\s*\\n/g,'\\n\\n').trim();\n}\nfunction csvText(v) { return typeof v === \"string\" && /^[\\s]*[=+@-]/.test(v) ? \"'\" + v : v; }\nreturn $input.all().map((item,index) => {\n  const m = item.json;\n  const header = name => (m.payload?.headers || []).filter(h=>h.name.toLowerCase()===name).map(h=>h.value).join(' | ');\n  const body = {plain:[],html:[],warnings:[]}; collect(m.payload,body);\n  const text = body.plain.length ? body.plain.join('\\n\\n') : htmlText(body.html.join('\\n'));\n  if (!body.plain.length && body.html.length) body.warnings.push('HTML converted to approximate review text; verify original');\n  if (!text) body.warnings.push('No readable body extracted');\n  const scope = Number(m.internalDate) >= START;\n  const signalText = header('subject') + '\\n' + text;\n  const hints = [];\n  if (/not (?:be )?(?:progressing|proceeding|moving forward)|unsuccessful|regret to inform|not been selected|other candidates|unfortunately[\\s\\S]{0,120}application/i.test(signalText)) hints.push('rejection');\n  if (/interview (?:invitation|scheduled)|invite you to (?:an? )?interview|schedule (?:an? |your )?interview/i.test(signalText)) hints.push('interview');\n  if (/application (?:has been |was )?received|received your application|thank you for (?:your application|applying)/i.test(signalText)) hints.push('confirmation');\n  return {json:{reviewerDecision:\"\",reviewerNotes:\"\",reviewedAt:\"\",gmailMessageId:m.id,threadId:m.threadId,subject:header('subject'),from:header('from'),date:header('date'),internalDate:m.internalDate,inHistoricalWindow:scope,existingLabels:m.labelIds || [],reviewStatus:scope?'pending_manual_review':'outside_date_window',candidateSignals:hints.join(', ') || 'none',classification:'unconfirmed',reviewText:text,extractionWarnings:body.warnings.join('; '),note:'Signals may match quotations or mixed outcomes. Human review required. No labels applied.'},pairedItem:{item:index}};\n}).map(item => { for (const key of [\"subject\",\"from\",\"date\",\"reviewText\",\"extractionWarnings\"]) item.json[key] = csvText(item.json[key]); return item; });"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        0
+      ],
+      "id": "31e69a7a-d303-4f5b-b121-d50291132267",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "options": {
+          "fileName": "JAIS-sample-review.csv"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "81cf30ed-4a1d-48c3-aba4-d563a066c3ae",
+      "name": "Convert to File"
+    }
+  ],
+  "connections": {
+    "Run manually": {
+      "main": [
+        [
+          {
+            "node": "List up to 10 IDs — read only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List up to 10 IDs — read only": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Convert to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "active": false
+}
