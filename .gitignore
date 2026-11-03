@@ -1,0 +1,21 @@
+# Personal and runtime data must stay local
+.env
+.env.*
+!.env.example
+*.csv
+*.eml
+*.mbox
+*.sqlite
+*.sqlite3
+*.db
+*.log
+.n8n/
+n8n_data/
+credentials/
+tokens/
+exports/
+evidence/
+captures/
+node_modules/
+__pycache__/
+.DS_Store
